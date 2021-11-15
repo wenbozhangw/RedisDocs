@@ -79,7 +79,7 @@ A     "g$lshztxed" 的别名，因此字符串 "AKE" 表示除了 "m" 的所有�
 - [RENAME](../commands/RENAME.md) 生成两个事件，一个是为源 key 生成一个 `rename_from` 事件，一个是为目标 key 生成的 `rename_to` 事件。
 - [MOVE](../commands/MOVE.md) 生成两个事件，一个是为源 key 生成一个 `move_from` 事件，一个是为目标 key 生成的 `move_to` 事件。
 - [COPY](../commands/COPY.md) 生成一个 `copy_to` 事件。
-- [MIGRATE](../commands/MIGRATE.md) 如果源 key 被删除，则生成一个 `del` 事件。
+- [MIGRATE](../commands/migrate.md) 如果源 key 被删除，则生成一个 `del` 事件。
 - [RESTORE](../commands/RESTORE.md) 为 key 生成一个 `restore` 事件。
 - [EXPIRE](../commands/EXPIRE.md) 及其所有变体（ [PEXPIRE](../commands/PEXPIRE.md)、[EXPIREAT](../commands/EXPIREAT.md)、[PEXPIREAT](../commands/PEXPIREAT.md) ）在使用正数超时时间（或未来时间戳）调用时会生成一个 `expire` 事件。请注意，当使用过去的负超时时间或时间戳调用这些命令时，key将被删除，而只会生成一个 `del` 事件。
 - [SORT](../commands/SORT.md) 当使用 **STORE** 设置新 key 时，会生成一个 `sortstore` 事件。如果结果列表为空，并且使用了 **STORE** 选项，并且已经存在具有该名称的键，则结果是键被删除，因此在这种情况下，会生成 `del` 事件。

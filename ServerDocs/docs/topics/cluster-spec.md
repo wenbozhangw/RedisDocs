@@ -309,9 +309,66 @@ GET x
 
 Redis Cluster 支持在集群运行过程中添加或移除节点。实际上，添加或移除节点都被抽象为同一个操作，那就是把哈希槽从一个节点移动到另一个节点。这意味着可以使用相同的基本机制(basic mechanism)来重新平衡集群、添加或删除节点等。
 
-- 为了向集群添加一个新节点
+- 向集群添加一个新节点，就是把一个空节点加入到集群中并把某些哈希槽从已存在的节点迁移到新节点上。
+- 从集群中移除一个节点，就是把该节点上的哈希槽迁移到其他已经存在的节点上。
+- 为了重新平衡集群，在节点之间移动一组给定的哈希槽。
 
+所以实现这个的核心是能把哈希槽移来移去。从实际角度看，哈希槽只是一组 key，因此 Redis Cluster 在重新分片期间真正做的是将 key 从一个实例移动到另一个实例。移动一个哈希槽意味着将所有碰巧哈希后对应这个槽的 key 移动到这个哈希槽中。
 
+为了理解其工作原理，我们需要展示用于操作 Redis Cluster 节点上的哈希槽转换表(slots translation table) 的 CLUSTER 子命令。
 
+以下是可用的子命令：
+
+- [CLUSTER ADDSLOTS](../commands/cluster-addslots.md) slot1 [slot2] ... [slotN]
+- [CLUSTER DELSLOTS](../commands/cluster-delslots.md) slot1 [slot2] ... [slotN]
+- [CLUSTER SETSLOT](../commands/cluster-setslot.md) slot NODE node
+- [CLUSTER SETSLOT](../commands/cluster-setslot.md) slot MIGRATING node
+- [CLUSTER SETSLOT](../commands/cluster-setslot.md) slot IMPORTING node
+
+前两个命令 `ADDSLOTS` 和 `DELSLOTS` 仅用于给一个 Redis 节点指派(assign)或移除哈希槽。分配槽意味着告诉给定的主节点它将负责为指定的哈希槽存储和提供内容。
+
+分配哈希槽后，它们将使用 gossip 协议在集群中传播，如后面 _configuration propagation_ 部分所述。
+
+`ADDSLOTS` 命令通常用于从头创建新集群时，为每个主节点分配所有 16384 个可用哈希槽的子集。
+
+`DELSLOTS` 主要用于手动修改集群配置或调试任务：在实践中很少使用。
+
+如果使用 `SETSLOT <slot> NODE` 形式，则 `SETSLOT` 子命令用于将槽分配给特定节点 ID。否则，槽可以设置为两种特殊状态 `MIGRATING` 和 
+`IMPORTING`。这两种特殊状态用于将哈希槽从一个节点迁移到另一个节点。
+
+- 当一个槽被设置为 `MIGRATING`，原来持有该哈希槽的节点仍会接受所有跟这个哈希槽有关的请求，但只有当查询的 key 还存在原节点时，原节点会处理该请求，否则这个查询会通过一个 -ASK重定向(-ASK 
+  redirection) 转发到迁移的目标节点。
+- 当一个槽被设置为 `IMPORTING`，只有在接收到 [ASKING](../commands/asking.md) 命令之后节点才会接收所有查询这个哈希槽的请求。如果客户端一直没有发送 [ASKING](../commands/asking.md) 命令，那么查询都会通过 -MOVE重定向(-MOVE redirection) 错误信息转发到真正处理这个哈希槽的节点那里。
+
+那么讲可能显得有点奇怪，现在我们用实例让它更清晰些。假设我们有两个 Redis 节点，称为 A 和 B。我们想要把哈希槽 8 从节点 A 转移到节点 B，所以我们发送了这样的命令：
+
+- 我们向节点 B 发送：`CLUSTER SETSLOT 8 IMPORTING A`
+- 我们向节点 A 发送：`CLUSTER SETSLOT 8 MIGRATING B`
+
+其它所有节点在每次被询问到的一个 key 是属于哈希槽 8 的时候，都会把客户端引向节点 A。具体如下：
+
+- 所有关于已存在的 key 的查询都由节点 A 处理。
+- 所有关于不存在于节点 A 的 key 都由节点 B 处理。
+
+这种方式让我们可以不用在节点 A 中创建新的 key。同时，在重新分片和 Redis Cluster 配置期间使用的 redis-cli 会将哈希槽 8 中现有的 key 从 A 迁移到 B。这是使用以下命令执行的：
+
+```
+CLUSTER GETKEYSINSLOT slot count
+```
+
+上面这个命令会返回指定的哈希槽中的 count 个 key。对于每个返回的 key，redis-cli 向节点 A 发送一个 [MIGRATE](../commands/migrate.md) 命令，该命令以原子方式将指定的 key 从 A 迁移到 B（在移动 key 的过程中，两个节点都被锁住（通常是非常短的时间），以避免出现竞争状况）。以下是 [MIGRATE](../commands/migrate.md) 的工作原理：
+
+```
+MIGRATE target_host target_port "" target_database id timeout KEYS key1 key2 ...
+```
+
+执行 [MIGRATE](../commands/migrate.md) 命令的节点会连接到目标节点，把序列化后的 key 发送过去，一旦接收到 OK 回复就会从它自己的数据集中删除旧的 key。从外部客户端的角度来看，key 在任何给定时间都存在于 A 或 B 中。
+
+在 Redis Cluster 中不需要指定 0 以外的数据库，但是 [MIGRATE](../commands/migrate.md) 是一个通用命令，可以用于其他不涉及 Redis Cluster 的任务。[MIGRATE](../commands/migrate.md) 经过优化，即使在移动复杂的 key（如长列表）时也能尽可能快地运行，但在 Redis Cluster 中，如果使用数据库的应用程序存在延迟，则在存在 big key 的情况下重新配置集群是很不明智的。
+
+当迁移过程最终完成的时候，`SETSLOT <slot> NODE <node-id>` 命令被发送到迁移中涉及的两个节点，以便再次将槽者视为它们的正常状态。通常将相同的命令发送到所有其他节点，以免等待新配置在集群中自然传播。
+
+---
 
 ### ASK redirection 
+
